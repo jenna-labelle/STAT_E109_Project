@@ -1,0 +1,248 @@
+---
+title: "R Notebook"
+output: html_document
+---
+
+## Libraries
+```{r}
+library(dplyr)
+```
+
+```{r}
+base_dir = "/Users/jlabelle/Dropbox (Partners HealthCare)/"
+working_dir<- paste0(base_dir, "Personal/STAT_E109/Assignments/Project/")
+
+## Set output directories
+data_dir<- "data/"
+analysis_dir<- "analysis/Preprocessing/"
+
+```
+
+#################
+## Bulk RNAseq ##
+#################
+```{r}
+## Get file paths
+file_dir<- "data/count_matrics/"
+file_names<- list.files(file_dir)
+
+## Read in file for converting sample names
+sample_names<- read.delim("data/File_metadata_melanoma.txt")
+
+## Read in first file
+cm<- read.csv(paste0(file_dir,file_names[1] ), sep="\t", skip=1)
+cm<- cm[5:nrow(cm), c("gene_name", "tpm_unstranded")]
+
+  ## Take average of any duplicated genes
+  dup_genes<- cm$gene_name[duplicated(cm$gene_name)]
+  dup_cm<- cm[cm$gene_name %in% dup_genes,]
+  dup_cm<- dup_cm %>% group_by(gene_name) %>% summarise(tpm_unstranded=sum(tpm_unstranded)) %>% as.data.frame()
+  cm<- rbind(cm[!cm$gene_name %in% dup_genes,], dup_cm)
+  colnames(cm)<- c("gene", gsub(".rna_seq.augmented_star_gene_counts.tsv", "", file_names[1]))
+  
+## Cycle through remaining files, reading in and merging together
+for(file in file_names[2:length(file_names)]){
+  cm_tmp<- read.csv(paste0(file_dir,file ), sep="\t", skip=1)
+  cm_tmp<- cm_tmp[5:nrow(cm_tmp), c("gene_name", "tpm_unstranded")]
+  
+  ## Take average of any duplicated genes
+  dup_genes<- cm_tmp$gene_name[duplicated(cm_tmp$gene_name)]
+  dup_cm<- cm_tmp[cm_tmp$gene_name %in% dup_genes,]
+  dup_cm<- dup_cm %>% group_by(gene_name) %>% summarise(tpm_unstranded=sum(tpm_unstranded)) %>% as.data.frame()
+  cm_tmp<- rbind(cm_tmp[!cm_tmp$gene_name %in% dup_genes,], dup_cm)
+  colnames(cm_tmp)<- c("gene", gsub(".rna_seq.augmented_star_gene_counts.tsv", "",file))
+  cm<- cbind(cm, cm_tmp)
+}
+  
+rownames(cm)<- cm$gene
+cm<- cm[,!grepl("gene", colnames(cm))]
+
+## Rename columns to match clinical ids
+sample_names$file_name_new<- gsub(".rna_seq.augmented_star_gene_counts.tsv", "",
+                                  sample_names$file_name)
+colnames(cm)<- plyr::mapvalues(colnames(cm), sample_names$file_name_new, sample_names$cases.0.case_id,
+                               warn_missing = FALSE)
+
+## Remove genes with 0 counts for all samples
+cm<- cm[rowSums(cm)>0,]
+
+## Center (same way as pseudobulked data)
+bulk_scale<-as.data.frame(t(apply(cm, 1, function(x){x-mean(x)})))
+
+## Save
+saveRDS(cm, file=paste0(analysis_dir, "bulk_melanoma_cm_tpm.Rds"))
+saveRDS(bulk_scale, file=paste0(analysis_dir, "bulk_melanoma_cm_tpm_scaled.Rds"))
+```
+
+
+
+
+
+#############################
+## Single cell RNAseq data ##
+#############################
+
+## Read in data: raw count matrix, marker genes, cell annotations
+```{r}
+cm<- read.table(paste0(data_dir, "GSE72056_melanoma_single_cell_revised_v2.txt"), header=TRUE)
+cell_annots<- read.csv(paste0(data_dir, "NIHMS791837-supplement-2.csv"))
+
+## Change cell type name so it matches top genes
+colnames(cell_annots)<- gsub("\\.","-", gsub("Mcrophages", "Macrophages", 
+                                             gsub("Melanoma", "melanoma", colnames(cell_annots))))
+colnames(cell_annots)<- gsub("Endothelial-cells", "Endothelialcells", colnames(cell_annots))
+```
+
+
+## Process count matrix: remove unneeded rows, normalize counts
+```{r}
+## Row 1 contains sample info- remove and reformat
+samples<- as.character(cm[1,])
+samples<- paste0("Sample", samples)
+names(samples)<-colnames(cm)
+samples<- samples[names(samples) != "Cell"]
+
+## Rows 2 and 3 contain cell annotations- remove and reformat these
+cell_annot<- as.data.frame(t(cm[2:3,]))
+colnames(cell_annot)<- cell_annot[1,]
+cell_annot<- cell_annot[-1,]
+cell_annot$cellType<- cell_annot$`non-malignant cell type (1=T,2=B,3=Macro.4=Endo.,5=CAF;6=NK)`
+cell_annot$`non-malignant cell type (1=T,2=B,3=Macro.4=Endo.,5=CAF;6=NK)`<-NULL
+cell_annot$cellType<- gsub(2, "T-cells", gsub(1, "B-cells",gsub(3, "Macrophages",gsub(4, "Endothelialcells",
+                      gsub(5, "CAFs",gsub(6, "NK",gsub(0, "melanoma",cell_annot$cellType)))))))
+
+## Remove sample info + cell annotations (rows 1-3) from count matrix
+cm<- cm[4:nrow(cm),]
+cm<- cm %>% rename(gene=Cell) %>% as.data.frame()
+
+## Convert counts to numeric (set to character by default here)
+cm<- cm[!duplicated(cm$gene),]
+rownames(cm)<- cm$gene; cm<- cm[,-1]
+genes<- rownames(cm)
+cm<- as.data.frame(apply(cm, 2, function(x){as.numeric(x)}))
+rownames(cm)<- genes
+
+## Convert to counts per million to normalize for differences in sequencing depth
+cm_norm<- as.data.frame(apply(cm, 2, function(x){x/sum(x)*1000000}))
+
+## Save normalized count matrix +samples
+saveRDS(cm_norm, file=paste0(analysis_dir, "cm_norm.Rds"))
+saveRDS(samples, file=paste0(analysis_dir, "samples.Rds"))
+saveRDS(cell_annot, file=paste0(analysis_dir, "cell_annot.Rds"))
+```
+
+
+## Pseudobulk into randomized "samples'
+```{r}
+## Read in processed count matrix + cell annotations
+cm_norm<- readRDS(paste0(analysis_dir, "cm_norm.Rds"))
+cell_annot<- readRDS(paste0(analysis_dir, "cell_annot.Rds"))
+marker_genes<- read.csv(paste0(data_dir, "NIHMS791837-supplement-3.csv"))
+bulk_cm<- readRDS(paste0(analysis_dir, "bulk_melanoma_cm_tpm.Rds"))
+
+## Subset count matrix to genes present in both single cell and bulk- may affect centering
+cm_norm<- cm_norm[rownames(cm_norm) %in% rownames(bulk_cm),]
+
+## Generate list of sampled cells to use for pseudobulked samples
+cells_use<- split(colnames(cm_norm), ceiling(seq_along(colnames(cm_norm))/92))
+names(cells_use)<- paste0("Sample", 1:length(cells_use))
+
+
+## for each set of cells, get counts and pseudobulk
+## Generate 50 pseudobulk samples, create pseudobulked counts for each
+pseudobulk<- lapply(names(cells_use), function(x){
+  cells<- cells_use[[x]]
+  cm_tmp<- cm_norm[,cells]
+  pb<- as.data.frame(rowMeans(cm_tmp))
+  colnames(pb)<-x
+  return(pb)
+})
+pseudobulk<- do.call("cbind", pseudobulk)
+
+## Normalize and center pseudobulked data so that genes are normally distributed
+pseudobulk<- as.data.frame(apply(pseudobulk, 2, function(x){x/sum(x)*1e06}))
+pseudo_norm<- log(pseudobulk+1)
+#pseudo_scale<- as.data.frame(t(apply(pseudobulk, 2, function(x){x-mean(x)})))
+pseudo_scale<- as.data.frame(pseudo_norm-rowMeans(pseudo_norm))
+
+## Subset marker genes to top genes using rank (based on logFC of gene within that cell type)
+## Need to first remove any genes in marker gene list that are NOT found in bulk data- will not be able to build model using data from that gene
+marker_genes<- marker_genes[marker_genes$Marker %in% rownames(bulk_cm),]
+top_genes<- marker_genes %>% group_by(CellType) %>% top_n(n=-15, wt=Rank) %>% as.data.frame()
+
+## Subset full count matrix to just these genes- will use as input to linear regression model
+pb_topGenes<- pseudo_scale[top_genes$Marker,]
+pb_topGenes<- as.data.frame(t(pb_topGenes))
+```
+
+
+## For each set of cells, get proportion of each cell type present
+```{r}
+## Some cell types not present in random sample. will add in as 0%
+all_cell_types<- unique(cell_annot$cellType)
+cells_prop<- lapply(names(cells_use), function(x){
+  cells<- cells_use[[x]]
+  annots<- cell_annot[cells,]
+  annot_prop<-annots %>% group_by(cellType) %>% 
+    summarise(nCells=n()) %>% mutate(perCells=nCells/sum(nCells)) %>% 
+    dplyr::select(-nCells) %>%
+    as.data.frame()
+
+  ## Add in any cell types not present
+  if(sum(all_cell_types %in% annot_prop$cellType)!=7 ){
+    celltypes_add<- all_cell_types[!all_cell_types %in% annot_prop$cellType]
+    annot_prop<- rbind(annot_prop,data.frame(cellType=celltypes_add,  perCells=0))
+  }
+  
+  ## Add on sample name, order
+  colnames(annot_prop)<- c("cellType", x)
+  annot_prop<- annot_prop[order(annot_prop$cellType),]
+  
+  return(annot_prop)
+})
+cells_prop<- do.call("cbind", cells_prop)
+rownames(cells_prop)<- cells_prop$cellType
+cells_prop<- cells_prop[,!grepl("cellType", colnames(cells_prop))]
+cells_prop<- as.data.frame(t(cells_prop))
+```
+
+## Merge pseudobulk + proportions into single df and export
+```{r}
+## Merge pseudobulk + proportions into single df
+pb_prop<- merge(pb_topGenes, cells_prop, by=0)
+rownames(pb_prop)<- pb_prop$Row.names; pb_prop$Row.names<- NULL
+
+## Create df for each cell type: proportion of that cell type + gene expression for its markers
+all_df<- lapply(all_cell_types, function(x){
+  markers<- top_genes[top_genes$CellType==x, "Marker"]
+  df_tmp<- pb_prop[,c(x, markers)]
+  return(df_tmp)
+})
+names(all_df)<-all_cell_types
+
+## Save each as a csv
+for(i in all_cell_types){
+  df<- all_df[[i]]
+  write.csv(df, file=paste0(analysis_dir, i, "_pseudobulked_marker.prop.csv"))
+}
+
+## Save
+write.csv(pb_topGenes, file=paste0(analysis_dir, "pb50_geneCounts_norm.csv"))
+```
+
+## For bulk data: subset to genes found in single cell data and rescale
+```{r}
+bulk_cm<- readRDS(paste0(analysis_dir, "bulk_melanoma_cm_tpm.Rds"))
+cm_norm<- readRDS(paste0(analysis_dir, "cm_norm.Rds"))
+bulk_cm<- bulk_cm[rownames(bulk_cm) %in% rownames(cm_norm),]
+
+## Center (same way as pseudobulked data)
+bulk_norm<- log(bulk_cm+1)
+bulk_scale<- bulk_norm-rowMeans(bulk_norm)
+
+## Save
+saveRDS(bulk_scale, file=paste0(analysis_dir, "bulk_melanoma_cm_tpm_scaled.Rds"))
+```
+
+
+
