@@ -1,0 +1,257 @@
+---
+title: "R Notebook"
+output: html_document
+---
+
+## Libraries
+```{r}
+library(dplyr)
+library(MASS)
+library(ggplot2)
+library(reshape2)
+library(caret)
+library(ggpubr)
+library(car)
+library(gridExtra)
+```
+
+```{r}
+base_dir = "/Users/jlabelle/Dropbox (Partners HealthCare)/"
+working_dir<- paste0(base_dir, "Personal/STAT_E109/Assignments/Project/")
+
+## Set output directories
+data_dir<- "analysis/Preprocessing/"
+analysis_dir<- "analysis/predictCellTypeComp/"
+figure_dir<- "figures/"
+
+```
+
+## Read in data:
+1. Pseudobulked data used to build linear regression model. Each dataframe contains the proportion of that cell type found in each sample + expression of the top 15 genes contributing to that cell type
+
+2. Bulk expression data- linear regression models applied to this data to predict cell type composition
+
+```{r}
+## Pseudobulk data
+  ## List of files for each cell type
+  files<- list.files(data_dir, pattern="_pseudobulked_marker.prop.csv")
+  files<- files[!grepl("NK", files)]
+  cell_types<- gsub("_pseudobulked_marker.prop.csv", "",gsub("-", "\\." ,files))
+  
+  ## Read in each df
+  df_byCellType<- lapply(files, function(x){read.csv(paste0(data_dir, x), row.names = "X")})
+  names(df_byCellType)<- cell_types
+  
+## Bulk data
+bulk_cm<- readRDS(paste0(data_dir, "bulk_melanoma_cm_tpm_scaled.Rds"))
+
+## Save head of data frame to show example of data structure
+df<-df_byCellType$B.cells[1:5, ]
+png(paste0(figure_dir, "Table2_Bcells_example.df.png"), height=200, width=2300)
+p<-tableGrob(df)
+grid.arrange(p)
+dev.off()
+```
+
+## Split each dataframe into training/testing
+```{r}
+train.test_byCellType<- lapply(cell_types, function(x){
+  df<- df_byCellType[[x]]
+  set.seed(1)
+  ind <- sample(2, nrow(df), replace = T, prob = c(0.7, 0.3)) 
+  train <- df[ind == 1,]
+  test <- df[ind == 2,]
+  tt_list<- list(train=train, test=test)
+  return(tt_list)
+})
+names(train.test_byCellType)<- cell_types
+```
+
+#######################
+## Linear regression ##
+#######################
+
+## First, check to see if expression data is roughly normally distributed. 
+In general, gene expression is assumed to be normally distributed- researchers regularly apply tests that assume normality to gene expression data. Representative genes are shown here, although not all genes show clear normal distribution.
+```{r}
+png(paste0(figure_dir, "Figure1_geneExpression_normDistribution.png"), width=600, height=300)
+par(mfrow=c(2,3))
+hist(df_byCellType$B.cells$CLEC17A, main="CLEC17A in B.cells")
+hist(df_byCellType$CAFs$COL1A1,main="COL1A1 in CAFs")
+hist(df_byCellType$Endothelialcells$MYCT1, main="MYCT1 in Endothelial cells")
+hist(df_byCellType$Macrophages$C1QC,main="C1QC in Macrophages")
+hist(df_byCellType$melanoma$PLP1,main="PLP1 in melanoma")
+hist(df_byCellType$T.cells$CD3E, main="CD3E in T.cells")
+dev.off()
+
+```
+
+
+
+## For each cell type, generate multivariate linear regression model from training data:
+Outcome variable is the proportion of that cell type found in that sample
+Predictor variables are normalized expression values for the top 15 genes contributing to that cell type
+```{r}
+## For each cell type, generate model using stepAIC to determine which of the 15 genes contribute 
+all_models<- lapply(cell_types, function(cell_type){
+  train<- train.test_byCellType[[cell_type]]$train
+  train$Dependent<- train[[cell_type]]; train[[cell_type]]<-NULL
+  model<- lm(Dependent ~ ., train)
+  stepAIC_model<- stepAIC(model, trace=FALSE)
+  return(stepAIC_model)
+})
+names(all_models)<-cell_types
+
+## VIF for each model
+all_vif<- lapply(all_models, function(x){
+  tmp<- as.data.frame(vif(x))
+  tmp$gene<- rownames(tmp); rownames(tmp)<-NULL
+  return(tmp)
+})
+all_vif<- do.call("rbind", all_vif)
+
+## Plot VIF values
+colnames(all_vif)<- c("VIF", "Gene")
+all_vif$CellType<-  gsub('[[:digit:]]+', '', rownames(all_vif))
+ggplot(all_vif, aes(x=Gene, y=VIF, color=CellType))+
+  geom_point()+
+    theme_bw()+
+  facet_grid(cols = vars(CellType), space="free_x", scale="free_x")+
+  geom_hline(yintercept = 10, linetype="dashed")+
+  theme(axis.text.x = element_text(angle = 45, hjust=1, face="bold", color="black"),
+        legend.position = "none")+
+  ylab("VIF") + xlab("gene input into model")
+ggsave(paste0(figure_dir, "Figure2_LR_VIF_genesInModel.png"), width=8, height=3)
+
+## Remove genes with high VIF (>10)
+highVIF<- c("VPREB3", "CDH5", "CLDN5", "ECSCR", "TIE1", "MIA", "BANK1", "PAX5", "CD22")
+
+## For each cell type, generate model using stepAIC with the high VIF genes removed
+all_models<- lapply(cell_types, function(cell_type){
+  train<- train.test_byCellType[[cell_type]]$train
+  train<- train[,!colnames(train) %in% highVIF]
+  train$Dependent<- train[[cell_type]]; train[[cell_type]]<-NULL
+  model<- lm(Dependent ~ ., train)
+  stepAIC_model<- stepAIC(model, trace=FALSE)
+  return(stepAIC_model)
+})
+names(all_models)<-cell_types
+```
+
+
+## Plot metrics for each final model
+```{r}
+## QQ norm
+png(paste0(figure_dir, "QQnorm.png"), width=800, height=500)
+par(mfrow=c(2,3))
+for(i in names(all_models)){
+  model_tmp<- all_models[[i]]
+  plot(model_tmp, which=2, caption=i, main=paste0("QQ plot: ", i))
+}
+dev.off()
+
+## Cook's distance
+png(paste0(figure_dir, "CooksDistance.png"), width=800, height=500)
+par(mfrow=c(2,3))
+for(i in names(all_models)){
+  model_tmp<- all_models[[i]]
+  plot(model_tmp, which=5, caption=i, main=paste0("Cook's Distance: ", i))
+}
+dev.off()
+```
+
+## Plot genes included in model for each cell type
+```{r}
+## Get final gene input into each model
+gene_input<- lapply(names(all_models), function(x){
+  model_summary<- summary(all_models[[x]])
+  pvalues<- model_summary$coefficients[,"Pr(>|t|)"]
+  pvalues<- as.data.frame(pvalues[!grepl("Intercept", names(pvalues))])
+  pvalues$gene<- rownames(pvalues); pvalues$cellType<-x; rownames(pvalues)<-NULL
+  return(pvalues)
+})
+gene_input<- do.call("rbind", gene_input)
+
+## Plot each gene's contribution to model (pvalue)
+ggplot(gene_input, aes(x=gene, y=pvalues, color=cellType))+
+  geom_point()+
+  theme_bw()+
+  facet_grid(cols = vars(cellType), space="free_x", scale="free_x")+
+  geom_hline(yintercept = 0.05, linetype="dashed")+
+  theme(axis.text.x = element_text(angle = 45, hjust=1, face="bold", color="black"),
+        legend.position = "none")+
+  ylab("pvalue") + xlab("gene input into model")
+ggsave(paste0(figure_dir, "Figure3_LR_genesInputIntoModel.png"), width=8, height=3)
+```
+
+
+## For each cell type, use the model above to predict cell type proportions in testing data
+```{r}
+## For each cell type, apply model above to predict cell type proportion for testing data
+all_predict<- lapply(cell_types, function(cell_type){
+  test<- train.test_byCellType[[cell_type]]$test
+  model<- all_models[[cell_type]]
+  predict<- predict(model, test)
+  test$prediction<- predict
+  return(test)
+})
+names(all_predict)<- cell_types
+
+## Plot actual vs predicted
+all_plots<- lapply(cell_types, function(cell_type){
+  df<- all_predict[[cell_type]]
+  df$Actual<- df[[cell_type]]
+  
+  ## Get r2/pvalue for actual vs predicted
+  model<- summary(lm(Actual ~ prediction, df))
+  r2<- round(model$r.squared, 2)
+  pvalue<- formatC(model$coefficients["prediction", "Pr(>|t|)"],format="e", digits=2)
+  ggplot(df, aes(x=Actual, y=prediction))+
+    geom_point()+
+    theme_bw()+
+    ggtitle(cell_type,subtitle =  paste0("R2 = ", r2, ", pvalue = ", pvalue))+
+    ylab(paste0("Predicted proportion\nof ", cell_type))+
+    xlab(paste0("Actual proportion\nof ", cell_type))+
+    geom_smooth(method="lm", se=FALSE, color="red", linetype="dashed")+
+    theme(axis.title = element_text(color="black", face="bold"),
+          axis.text = element_text(color="black", face="bold"),
+          title  = element_text(color="black", face="bold"))
+})
+cowplot::plot_grid(plotlist=all_plots)
+ggsave(paste0(figure_dir, "Figure4_LinearRegression_PredictCellProportion_testing.png"), width=10, height=6)
+```
+
+## Apply linear regression models to bulk data to predict cell type proportions
+```{r}
+## Only select models that highly significantly predict (p<0.01) cell type in pseudobulked data
+sig_cellTypes<- c("B.cells", "CAFs", "Endothelialcells", "Macrophages", "melanoma")
+sig_models<- all_models[names(all_models) %in% sig_cellTypes]
+
+## Transpose bulk data
+bulk_t<- as.data.frame(t(bulk_cm))
+colnames(bulk_t)<- gsub("-", ".", colnames(bulk_t))
+
+## For each model, predict cell type proportion
+all_bulk_predict<- lapply(names(sig_models), function(x){
+  model_use<- sig_models[[x]]
+  bulk_predict<- predict(model_use, bulk_t)
+  bulk_predict<- as.data.frame(bulk_predict)
+  colnames(bulk_predict)<-paste0("predicted_", x)
+  return(bulk_predict)
+})
+all_bulk_predict<- do.call("cbind", all_bulk_predict)
+
+
+## Plot boxplot of results
+ggplot(tmp, aes(x=CellType, y=Proportion, fill=CellType))+
+  geom_boxplot()+
+  theme_bw()+
+  theme(legend.position = "none")+
+  ylab("Predicted cell type composition")+xlab("")+
+  ggtitle("Predicted cell type composition in bulk data\nbased on linear regression modeling")
+ggsave(paste0(figure_dir, "Figure5_LR_boxPlot_predictCompInBulk.png"), width = 5, height=5)
+
+write.csv(all_bulk_predict, file=paste0(analysis_dir, "linearRegression_bulk_predicted_cellProp.csv"))
+
+```
+
