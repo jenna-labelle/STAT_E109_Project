@@ -1,6 +1,20 @@
 # STAT_E109_Project
 ## Final project for STAT E109: Predicting melanoma tumor grade using estimated cell composition
 
+## Table of contents
+[Research question](#research-question-and-motivation) 
+
+[Data acquisition](#data-acquisition-and-processing) 
+
+[Predicting cell composition](#predicting-cell-composition) 
+
+[Predicting tumor grade](#predicting-tumor-grade) 
+
+[Conclusions](#conclusions)
+
+[References](#references)
+
+
 ### Research question and motivation:
 
 Cancer researchers frequently profile tumor tissue via “bulk” sequencing, which provides a cheap, quick, high-level look at the gene expression patterns for many samples. There are many publicly available cancer databases, such as the Cancer Genome Atlas [1], that provide this bulk gene expression data for large numbers of patient samples, as well as extensive clinical data such as age, patient outcome, and tumor grade. The major drawback to this bulk sequencing data is that all information on individual cell types within a tumor are lost. This information is critical, as recent work has highlighted the important anti-cancer role of immune cells within a tumor [2].
@@ -22,7 +36,8 @@ In order to generate the linear regression models to predict these cell type pro
 Following this pseudo-bulking process, gene expression values for both the pseudo-bulked samples as well as the actual bulk samples were normalized via 3 standardly used methods: 1) Counts per million (each sample is normalized to have exactly 1 million gene counts) 2) log transformation 3) centering counts for each sample. For code to perform preprocessing, see Preprocessing.Rmd within the github repository [4].
 
 
-### Predicting cell composition in pseudo-bulked samples: linear regression
+### Predicting cell composition 
+#### Predicting cell composition in pseudo-bulked samples: linear regression
 
 The first goal of this project is to predict the cell composition in bulk sequencing samples. To accomplish this, the pseudo-bulked samples (where actual cell composition is known) were used to generate models for each cell type. Because both the outcome (cell proportion) and predictors (gene expression) are numeric variables, linear regression seemed to be a reasonable choice. However, this model assumes normality, which is not always the case for gene expression data. 
 
@@ -47,7 +62,8 @@ The models were then further validated using the testing datasets. For all cell 
 
 For the 5 significant multivariate linear regression models (B.cells, CAFs, Endothelial cells, Macrophages, and melanoma), the proportion of these 5 cell types was predicted in bulk melanoma sequencing data (n=378).For CAFs and EndothelialCells, the majority of these predicted proportions are quite low, with most values less than 10%. This is what we may expect, however, as proportions of these cells are quite low in the single cell data as well (1.3% and 1.4%, respectively). 
 
-### Predicting tumor grade based on predicted cell type composition: decision tree modeling
+### Predicting tumor grade 
+#### Predicting tumor grade based on predicted cell type composition: decision tree modeling
 
 Bulk sequencing data was filtered to include only samples with tumor grade information available (n=116). Tumor grade was provided with high granularity, with each major class (Type1-IV) being split into additional subclasses. Because these sub-classes often contained only a few samples, tumor subtypes were simplified into their major classes. The data was then split into training (70%) and testing (30%) data sets (training settings: number=5, repeats=1, method=repeatedcv).
 
